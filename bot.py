@@ -18,7 +18,10 @@ INTERVALS = {
 }
 
 def analyze(symbol, interval):
-    df = yf.download(symbol, period="5d", interval=interval)
+    df = yf.download(symbol, period="7d", interval=interval)
+
+if df.empty:
+    return "BRAK DANYCH ⚠️", 0
 
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
@@ -58,7 +61,11 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         timeframe = context.args[1]
 
         symbol = SYMBOLS.get(asset)
-        interval = INTERVALS.get(timeframe)
+interval = INTERVALS.get(timeframe)
+
+if symbol is None or interval is None:
+    await update.message.reply_text("Błędne dane. Użyj np: /trend nasdaq 15m")
+    return
 
         signal, rsi = analyze(symbol, interval)
 
@@ -71,7 +78,8 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(msg)
 
-    except:
+    except Exception as e:
+    await update.message.reply_text(f"Błąd: {str(e)}")
         await update.message.reply_text("Użycie: /trend nasdaq 15m")
 
 app = ApplicationBuilder().token(TOKEN).build()

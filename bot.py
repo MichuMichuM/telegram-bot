@@ -4,7 +4,7 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = "8645220556:AAGmSpMANoV2EHyWBBr5B1jWllCpjcWWO-M"
+TOKEN = "8645220556:AAFH8GO9pZs7X4-GstlI2fGU477ThusIJAs"
 
 SYMBOLS = {
     "nasdaq": "^IXIC",

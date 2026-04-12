@@ -112,16 +112,18 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Błędne dane. Użyj np: /trend nasdaq 15m")
             return
 
-        signal, rsi, trend_dir, momentum = analyze(symbol, interval)
+signal, rsi, trend_dir, momentum = analyze(symbol, interval)
 
-        now = datetime.now().strftime("%H:%M")
+now = datetime.now().strftime("%H:%M")
 
-        msg = f"{asset.upper()} ({timeframe})\n"
+msg = f"{asset.upper()} ({timeframe})\n"
 msg += f"Czas: {now}\n\n"
 msg += f"Trend: {trend_dir}\n"
 msg += f"Momentum: {momentum}\n"
 msg += f"Sygnał: {signal}\n\n"
 msg += f"RSI: {rsi}"
+
+await update.message.reply_text(msg)
 
         await update.message.reply_text(msg)
 

@@ -23,6 +23,10 @@ def analyze(symbol, interval):
     if df.empty:
         return "BRAK DANYCH ⚠️", 0
 
+    # 🔴 KLUCZOWE — spłaszcz kolumny (naprawia błąd)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     df = df.dropna()
 
     # EMA
@@ -40,19 +44,18 @@ def analyze(symbol, interval):
 
     last = df.iloc[-1]
 
+    # 🔴 NA SIŁĘ zamieniamy na float (koniec problemów)
     ema20 = float(last["EMA20"])
     ema50 = float(last["EMA50"])
     rsi = float(last["RSI"])
 
     score = 0
 
-    # EMA
     if ema20 > ema50:
         score += 1
     else:
         score -= 1
 
-    # RSI
     if rsi < 30:
         score += 1
     elif rsi > 70:

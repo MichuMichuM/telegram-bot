@@ -23,6 +23,8 @@ def analyze(symbol, interval):
     if df.empty:
         return "BRAK DANYCH ⚠️", 0
 
+    df = df.dropna()
+
     # EMA
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
@@ -34,26 +36,28 @@ def analyze(symbol, interval):
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    if df.iloc[-1].isnull().any():
-        return "ZA MAŁO DANYCH ⚠️", 0
+    df = df.dropna()
 
     last = df.iloc[-1]
 
+    ema20 = float(last["EMA20"])
+    ema50 = float(last["EMA50"])
+    rsi = float(last["RSI"])
+
     score = 0
 
-    # Trend EMA
-    if last["EMA20"] > last["EMA50"]:
+    # EMA
+    if ema20 > ema50:
         score += 1
     else:
         score -= 1
 
     # RSI
-    if last["RSI"] < 30:
+    if rsi < 30:
         score += 1
-    elif last["RSI"] > 70:
+    elif rsi > 70:
         score -= 1
 
-    # decyzja
     if score >= 1:
         signal = "BUY 🔼"
     elif score <= -1:
@@ -61,7 +65,7 @@ def analyze(symbol, interval):
     else:
         signal = "NEUTRAL ⚪"
 
-    return signal, round(last["RSI"], 2)
+    return signal, round(rsi, 2)
 
 
 async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):

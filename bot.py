@@ -1,10 +1,17 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
+import asyncio
 from datetime import datetime
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# =========================
+# CONFIG
+# =========================
+
 TOKEN = "8645220556:AAFH8GO9pZs7X4-GstlI2fGU477ThusIJAs"
+CHAT_ID = "1846362978"
 
 SYMBOLS = {
     "nasdaq": "^IXIC",
@@ -12,212 +19,306 @@ SYMBOLS = {
     "gold": "GC=F"
 }
 
-INTERVALS = {
-    "1m": "1m",
-    "5m": "5m",
-    "15m": "15m",
-    "1h": "60m"
-}
+bot = Bot(token=TOKEN)
 
+# =========================
+# DATA
+# =========================
 
-def get_htf_trend(symbol):
-    df = yf.download(symbol, period="7d", interval="60m")
+def get_data(symbol, interval="5m", period="5d"):
+    df = yf.download(symbol, interval=interval, period=period)
+
+    if df is None or df.empty or len(df) < 100:
+        return None
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    df = df.dropna()
+    return df.dropna()
+
+
+# =========================
+# RSI (clean version)
+# =========================
+
+def rsi(df, period=14):
+    delta = df["Close"].diff()
+
+    gain = delta.where(delta > 0, 0).ewm(alpha=1/period).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period).mean()
+
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+# =========================
+# MARKET REGIME
+# =========================
+
+def regime(df):
+    atr = (df["High"] - df["Low"]).rolling(14).mean().iloc[-1]
+    price = df["Close"].iloc[-1]
+
+    vol = atr / price
+
+    ema20 = df["Close"].ewm(span=20).mean().iloc[-1]
+    ema50 = df["Close"].ewm(span=50).mean().iloc[-1]
+
+    trend_strength = abs(ema20 - ema50) / price
+
+    if vol < 0.003:
+        return "CHOP"
+    elif trend_strength > 0.008:
+        return "TREND"
+    else:
+        return "TRANSITION"
+
+
+# =========================
+# LIQUIDITY / SWEEP LOGIC
+# =========================
+
+def liquidity(df):
+    high = df["High"]
+    low = df["Low"]
+
+    sweep_high = high.iloc[-1] > high.iloc[-10:-1].max()
+    sweep_low = low.iloc[-1] < low.iloc[-10:-1].min()
+
+    return sweep_high, sweep_low
+
+
+# =========================
+# HTF BIAS
+# =========================
+
+def htf_bias(symbol):
+    df = get_data(symbol, "1h", "7d")
+
+    if df is None:
+        return "NEUTRAL"
+
     df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-    last = df.iloc[-1]
-
-    if float(last["Close"]) > float(last["EMA200"]):
-        return "UP 📈"
-    else:
-        return "DOWN 📉"
+    return "BULL" if df["Close"].iloc[-1] > df["EMA200"].iloc[-1] else "BEAR"
 
 
-def analyze(symbol, interval):
-    # dobór danych
-    if interval == "1m":
-        period = "1d"
-    elif interval == "5m":
-        period = "5d"
-    else:
-        period = "7d"
+# =========================
+# CORE ENGINE (PRO SCORING)
+# =========================
 
-    df = yf.download(symbol, period=period, interval=interval)
+def analyze(symbol):
 
-    if df.empty:
-        return "BRAK DANYCH ⚠️", 0, "-", "-", "-", 0, None, None, None
+    df = get_data(symbol, "5m", "5d")
+    if df is None:
+        return None
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    df = df.dropna()
-
-    # EMA
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
+    df["RSI"] = rsi(df)
 
-    # RSI
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    close = df["Close"].iloc[-1]
+    prev = df.iloc[-2]
 
-    # MACD
-    ema12 = df["Close"].ewm(span=12).mean()
-    ema26 = df["Close"].ewm(span=26).mean()
-    df["MACD"] = ema12 - ema26
-    df["SIGNAL"] = df["MACD"].ewm(span=9).mean()
+    ema20 = df["EMA20"].iloc[-1]
+    ema50 = df["EMA50"].iloc[-1]
+    ema200 = df["EMA200"].iloc[-1]
+    rsi_v = df["RSI"].iloc[-1]
 
-    # Bollinger
-    df["MA20"] = df["Close"].rolling(20).mean()
-    df["STD"] = df["Close"].rolling(20).std()
-    df["UPPER"] = df["MA20"] + 2 * df["STD"]
-    df["LOWER"] = df["MA20"] - 2 * df["STD"]
+    reg = regime(df)
+    bias = htf_bias(symbol)
+    sweep_high, sweep_low = liquidity(df)
 
-    # ATR
-    df["H-L"] = df["High"] - df["Low"]
-    df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
-    df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
-    df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
-    df["ATR"] = df["TR"].rolling(14).mean()
+    atr = (df["High"] - df["Low"]).rolling(14).mean().iloc[-1]
 
-    df = df.dropna()
-    last = df.iloc[-1]
-
-    close = float(last["Close"])
-    ema20 = float(last["EMA20"])
-    ema50 = float(last["EMA50"])
-    ema200 = float(last["EMA200"])
-    rsi = float(last["RSI"])
-    macd = float(last["MACD"])
-    signal_line = float(last["SIGNAL"])
-    atr = float(last["ATR"])
-
-    # TREND
-    trend = "UP 📈" if close > ema200 else "DOWN 📉"
-
-    # MOMENTUM
-    momentum = "BULLISH" if macd > signal_line else "BEARISH"
-
-    # FVG
-    fvg = "NONE"
-    if len(df) > 3:
-        c1 = df.iloc[-3]
-        c3 = df.iloc[-1]
-
-        if c1["High"] < c3["Low"]:
-            fvg = "BULLISH"
-        elif c1["Low"] > c3["High"]:
-            fvg = "BEARISH"
-
-    # filtr szumu
-    if interval in ["1m", "5m"]:
-        if abs(rsi - 50) < 5:
-            return "NO TRADE ⚪ (CHOP)", rsi, trend, momentum, fvg, 0, None, None, None
+    # =========================
+    # SCORE ENGINE (IMPORTANT)
+    # =========================
 
     score = 0
 
-    if ema20 > ema50:
+    # trend alignment
+    if ema20 > ema50 > ema200:
+        score += 3
+    elif ema20 < ema50 < ema200:
+        score -= 3
+
+    # HTF bias
+    score += 2 if bias == "BULL" else -2
+
+    # RSI logic
+    if 40 < rsi_v < 65:
         score += 1
-    else:
-        score -= 1
+    elif rsi_v > 70:
+        score -= 2
+    elif rsi_v < 30:
+        score += 2
 
-    if 45 < rsi < 65:
-        score += 1
+    # regime filter
+    if reg == "TREND":
+        score += 2
+    elif reg == "CHOP":
+        score -= 3
 
-    if macd > signal_line:
-        score += 1
-    else:
-        score -= 1
+    # liquidity traps
+    if sweep_low:
+        score += 2
+    if sweep_high:
+        score -= 2
 
-    if fvg == "BULLISH":
-        score += 1
-    elif fvg == "BEARISH":
-        score -= 1
+    # breakout zones
+    recent_high = df["High"].iloc[-15:].max()
+    recent_low = df["Low"].iloc[-15:].min()
 
-    if close > last["UPPER"] or close < last["LOWER"]:
-        score -= 1
+    breakout_up = close > recent_high * 0.999
+    breakout_down = close < recent_low * 1.001
 
-    if score >= 3:
-        signal = "BUY 🔼 (STRONG)"
-    elif score <= -3:
-        signal = "SELL 🔽 (STRONG)"
-    else:
-        signal = "NO TRADE ⚪"
+    # =========================
+    # SIGNAL DECISION
+    # =========================
 
-    confidence = min(abs(score) * 20, 100)
+    signal = "NO TRADE"
 
-    # fake breakout
-    prev = df.iloc[-2]
+    if score >= 8 and breakout_up:
+        signal = "BUY A+ 🔼"
+    elif score <= -8 and breakout_down:
+        signal = "SELL A+ 🔽"
 
+    confidence = min(100, max(0, (score + 6) * 10))
+
+    # fake breakout protection
     if signal.startswith("BUY") and close < prev["High"]:
-        return "NO TRADE ⚪ (FAKE)", rsi, trend, momentum, fvg, 0, None, None, None
-
+        return None
     if signal.startswith("SELL") and close > prev["Low"]:
-        return "NO TRADE ⚪ (FAKE)", rsi, trend, momentum, fvg, 0, None, None, None
+        return None
 
-    # ENTRY / SL / TP
-    entry = None
-    sl = None
-    tp = None
+    # =========================
+    # STRICT FILTER (NO TRASH TRADES)
+    # =========================
 
-    if signal.startswith("BUY") and momentum == "BULLISH":
-        entry = close
+    if confidence < 85:
+        return None
+
+    if abs(score) < 8:
+        return None
+
+    # SL / TP (ATR based)
+    entry = close
+
+    if "BUY" in signal:
         sl = close - atr
-        tp = close + (2 * atr)
-
-    elif signal.startswith("SELL") and momentum == "BEARISH":
-        entry = close
+        tp = close + 3 * atr
+    else:
         sl = close + atr
-        tp = close - (2 * atr)
+        tp = close - 3 * atr
 
-    return signal, round(rsi, 2), trend, momentum, fvg, confidence, entry, sl, tp
+    return {
+        "signal": signal,
+        "score": score,
+        "confidence": confidence,
+        "rsi": rsi_v,
+        "regime": reg,
+        "bias": bias,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp
+    }
 
+
+# =========================
+# TELEGRAM MESSAGE
+# =========================
+
+async def send(symbol, data):
+
+    msg = f"""
+🏦 INSTITUTIONAL ALERT
+
+📊 {symbol.upper()}
+
+🔥 {data['signal']}
+🧠 Score: {data['score']}
+🎯 Confidence: {data['confidence']}%
+
+📈 Bias: {data['bias']}
+🌊 Regime: {data['regime']}
+📉 RSI: {round(data['rsi'],2)}
+
+ENTRY: {round(data['entry'],2)}
+SL: {round(data['sl'],2)}
+TP: {round(data['tp'],2)}
+
+⚡ HIGH QUALITY ONLY ⚡
+"""
+
+    await bot.send_message(chat_id=CHAT_ID, text=msg)
+
+
+# =========================
+# AUTO SCANNER
+# =========================
+
+async def scanner():
+
+    while True:
+        for name, symbol in SYMBOLS.items():
+
+            try:
+                result = analyze(symbol)
+
+                if result:
+                    await send(name, result)
+
+                    with open("signals_v5.csv", "a") as f:
+                        f.write(f"{datetime.now()},{name},{result['signal']},{result['score']},{result['confidence']}\n")
+
+            except Exception as e:
+                print("error:", e)
+
+        await asyncio.sleep(300)
+
+
+# =========================
+# /trend COMMAND
+# =========================
 
 async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        asset = context.args[0]
-        timeframe = context.args[1]
 
-        symbol = SYMBOLS.get(asset)
-        interval = INTERVALS.get(timeframe)
+    asset = context.args[0]
+    symbol = SYMBOLS.get(asset)
 
-        if symbol is None or interval is None:
-            await update.message.reply_text("Użycie: /trend nasdaq 15m")
-            return
+    if not symbol:
+        await update.message.reply_text("Use: /trend nasdaq")
+        return
 
-        signal, rsi, trend_dir, momentum, fvg, confidence, entry, sl, tp = analyze(symbol, interval)
-        htf = get_htf_trend(symbol)
+    data = analyze(symbol)
 
-        now = datetime.now().strftime("%H:%M")
+    if not data:
+        await update.message.reply_text("No A+ setup")
+        return
 
-        msg = f"{asset.upper()} ({timeframe})\n"
-        msg += f"Czas: {now}\n\n"
-        msg += f"HTF (1h): {htf}\n"
-        msg += f"Trend: {trend_dir}\n"
-        msg += f"Momentum: {momentum}\n"
-        msg += f"FVG: {fvg}\n\n"
-        msg += f"Sygnał: {signal}\n"
-        msg += f"Confidence: {confidence}%\n\n"
-        msg += f"RSI: {rsi}"
-
-        if entry:
-            msg += f"\nENTRY: {round(entry,2)}\n"
-            msg += f"SL: {round(sl,2)}\n"
-            msg += f"TP: {round(tp,2)}\n"
-
-        await update.message.reply_text(msg)
-
-    except Exception as e:
-        await update.message.reply_text(f"Błąd: {str(e)}")
+    await update.message.reply_text(
+        f"{asset.upper()}\n"
+        f"{data['signal']} ({data['confidence']}%)\n"
+        f"Score: {data['score']}\n"
+        f"RSI: {round(data['rsi'],2)}"
+    )
 
 
+# =========================
+# START
+# =========================
+
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("trend", trend))
+
+async def main():
+    asyncio.create_task(scanner())
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("trend", trend))
 

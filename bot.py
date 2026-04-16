@@ -1,12 +1,10 @@
 import yfinance as yf
 import pandas as pd
-import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = "8645220556:AAFH8GO9pZs7X4-GstlI2fGU477ThusIJAs"
-CHAT_ID = "1846362978"
 
 SYMBOLS = {
     "nasdaq": "^IXIC",
@@ -21,33 +19,45 @@ INTERVALS = {
     "1h": "60m"
 }
 
-last_alert_time = {}
 
-# HTF
 def get_htf_trend(symbol):
     df = yf.download(symbol, period="7d", interval="60m")
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     df = df.dropna()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
+
     last = df.iloc[-1]
-    return "UP" if last["Close"] > last["EMA200"] else "DOWN"
+
+    if float(last["Close"]) > float(last["EMA200"]):
+        return "UP 📈"
+    else:
+        return "DOWN 📉"
 
 
 def analyze(symbol, interval):
-
-    period = "7d"
+    # dobór danych
     if interval == "1m":
         period = "1d"
     elif interval == "5m":
         period = "5d"
+    else:
+        period = "7d"
 
     df = yf.download(symbol, period=period, interval=interval)
 
     if df.empty:
-        return None
+        return "BRAK DANYCH ⚠️", 0, "-", "-", "-", 0, None, None, None
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
     df = df.dropna()
 
     # EMA
+    df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
 
@@ -58,191 +68,157 @@ def analyze(symbol, interval):
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
+    # MACD
+    ema12 = df["Close"].ewm(span=12).mean()
+    ema26 = df["Close"].ewm(span=26).mean()
+    df["MACD"] = ema12 - ema26
+    df["SIGNAL"] = df["MACD"].ewm(span=9).mean()
+
+    # Bollinger
+    df["MA20"] = df["Close"].rolling(20).mean()
+    df["STD"] = df["Close"].rolling(20).std()
+    df["UPPER"] = df["MA20"] + 2 * df["STD"]
+    df["LOWER"] = df["MA20"] - 2 * df["STD"]
+
     # ATR
-    df["TR"] = (df["High"] - df["Low"]).combine(
-        abs(df["High"] - df["Close"].shift(1)), max
-    )
+    df["H-L"] = df["High"] - df["Low"]
+    df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
+    df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
+    df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
     df["ATR"] = df["TR"].rolling(14).mean()
 
-    # Volume
-    df["VOL_MA"] = df["Volume"].rolling(20).mean()
-
     df = df.dropna()
-
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev2 = df.iloc[-3]
 
-    close = last["Close"]
-    rsi = last["RSI"]
-    atr = last["ATR"]
+    close = float(last["Close"])
+    ema20 = float(last["EMA20"])
+    ema50 = float(last["EMA50"])
+    ema200 = float(last["EMA200"])
+    rsi = float(last["RSI"])
+    macd = float(last["MACD"])
+    signal_line = float(last["SIGNAL"])
+    atr = float(last["ATR"])
 
-    trend = "UP" if close > last["EMA200"] else "DOWN"
-    htf = get_htf_trend(symbol)
+    # TREND
+    trend = "UP 📈" if close > ema200 else "DOWN 📉"
 
-    volume_spike = last["Volume"] > last["VOL_MA"] * 1.5
+    # MOMENTUM
+    momentum = "BULLISH" if macd > signal_line else "BEARISH"
 
-    # 🔥 MARKET STRUCTURE
-    hh = last["High"] > prev["High"]
-    ll = last["Low"] < prev["Low"]
+    # FVG
+    fvg = "NONE"
+    if len(df) > 3:
+        c1 = df.iloc[-3]
+        c3 = df.iloc[-1]
 
-    structure = "BULLISH" if hh else "BEARISH" if ll else "RANGE"
+        if c1["High"] < c3["Low"]:
+            fvg = "BULLISH"
+        elif c1["Low"] > c3["High"]:
+            fvg = "BEARISH"
 
-    # 🔥 LIQUIDITY SWEEP (STOP HUNT)
-    sweep_high = last["High"] > prev["High"] and close < prev["High"]
-    sweep_low = last["Low"] < prev["Low"] and close > prev["Low"]
+    # filtr szumu
+    if interval in ["1m", "5m"]:
+        if abs(rsi - 50) < 5:
+            return "NO TRADE ⚪ (CHOP)", rsi, trend, momentum, fvg, 0, None, None, None
 
-    # 🔥 FAKE BREAKOUT
-    fake_breakout_up = prev["High"] < prev2["High"] and close < prev["High"]
-    fake_breakout_down = prev["Low"] > prev2["Low"] and close > prev["Low"]
-
-    # FILTR CHOP
-    if 45 < rsi < 55 and not volume_spike:
-        return {"signal": "NO TRADE", "reason": "chop"}
-
-    # CONFLUENCE
     score = 0
 
-    if trend == "UP":
+    if ema20 > ema50:
         score += 1
-    if trend == "DOWN":
+    else:
         score -= 1
 
-    if volume_spike:
+    if 45 < rsi < 65:
         score += 1
 
-    if structure == "BULLISH":
+    if macd > signal_line:
         score += 1
-    elif structure == "BEARISH":
+    else:
         score -= 1
 
-    # 🔥 SMART MONEY SIGNALS
-    signal = "NO TRADE"
+    if fvg == "BULLISH":
+        score += 1
+    elif fvg == "BEARISH":
+        score -= 1
 
-    # BUY SETUP
-    if sweep_low and trend == "UP" and volume_spike:
-        signal = "BUY"
+    if close > last["UPPER"] or close < last["LOWER"]:
+        score -= 1
 
-    # SELL SETUP
-    if sweep_high and trend == "DOWN" and volume_spike:
-        signal = "SELL"
+    if score >= 3:
+        signal = "BUY 🔼 (STRONG)"
+    elif score <= -3:
+        signal = "SELL 🔽 (STRONG)"
+    else:
+        signal = "NO TRADE ⚪"
 
-    # FAKE BREAKOUT REVERSAL
-    if fake_breakout_up and trend == "DOWN":
-        signal = "SELL"
+    confidence = min(abs(score) * 20, 100)
 
-    if fake_breakout_down and trend == "UP":
-        signal = "BUY"
+    # fake breakout
+    prev = df.iloc[-2]
 
-    # HTF FILTER
-    if trend != htf:
-        signal = "NO TRADE"
+    if signal.startswith("BUY") and close < prev["High"]:
+        return "NO TRADE ⚪ (FAKE)", rsi, trend, momentum, fvg, 0, None, None, None
 
-    # ENTRY / SL / TP (smart)
-    entry = close
+    if signal.startswith("SELL") and close > prev["Low"]:
+        return "NO TRADE ⚪ (FAKE)", rsi, trend, momentum, fvg, 0, None, None, None
+
+    # ENTRY / SL / TP
+    entry = None
     sl = None
     tp = None
 
-    if signal == "BUY":
-        sl = last["Low"] - atr * 0.5
+    if signal.startswith("BUY") and momentum == "BULLISH":
+        entry = close
+        sl = close - atr
         tp = close + (2 * atr)
 
-    elif signal == "SELL":
-        sl = last["High"] + atr * 0.5
+    elif signal.startswith("SELL") and momentum == "BEARISH":
+        entry = close
+        sl = close + atr
         tp = close - (2 * atr)
 
-    # 🔥 ULTRA SETUP (bardzo rzadki)
-    ultra = False
-
-    if (
-        signal != "NO TRADE"
-        and volume_spike
-        and trend == htf
-        and abs(rsi - 50) > 10
-        and (sweep_high or sweep_low)
-    ):
-        ultra = True
-
-    # OPIS
-    desc = f"Trend {trend}, struktura {structure}."
-    if sweep_high or sweep_low:
-        desc += " Liquidity sweep."
-    if volume_spike:
-        desc += " Wysoki wolumen."
-
-    return {
-        "signal": signal,
-        "trend": trend,
-        "rsi": round(rsi, 2),
-        "entry": entry,
-        "sl": sl,
-        "tp": tp,
-        "desc": desc,
-        "ultra": ultra
-    }
+    return signal, round(rsi, 2), trend, momentum, fvg, confidence, entry, sl, tp
 
 
 async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        asset = context.args[0]
+        timeframe = context.args[1]
 
-    asset = context.args[0]
-    timeframe = context.args[1]
+        symbol = SYMBOLS.get(asset)
+        interval = INTERVALS.get(timeframe)
 
-    symbol = SYMBOLS.get(asset)
-    interval = INTERVALS.get(timeframe)
+        if symbol is None or interval is None:
+            await update.message.reply_text("Użycie: /trend nasdaq 15m")
+            return
 
-    data = analyze(symbol, interval)
+        signal, rsi, trend_dir, momentum, fvg, confidence, entry, sl, tp = analyze(symbol, interval)
+        htf = get_htf_trend(symbol)
 
-    if not data:
-        await update.message.reply_text("Brak danych")
-        return
+        now = datetime.now().strftime("%H:%M")
 
-    msg = f"{asset.upper()} ({timeframe})\n\n"
-    msg += f"{data['desc']}\n\n"
-    msg += f"Sygnał: {data['signal']}\n"
-    msg += f"RSI: {data['rsi']}\n"
+        msg = f"{asset.upper()} ({timeframe})\n"
+        msg += f"Czas: {now}\n\n"
+        msg += f"HTF (1h): {htf}\n"
+        msg += f"Trend: {trend_dir}\n"
+        msg += f"Momentum: {momentum}\n"
+        msg += f"FVG: {fvg}\n\n"
+        msg += f"Sygnał: {signal}\n"
+        msg += f"Confidence: {confidence}%\n\n"
+        msg += f"RSI: {rsi}"
 
-    if data["signal"] != "NO TRADE":
-        msg += f"\nENTRY: {round(data['entry'],2)}"
-        msg += f"\nSL: {round(data['sl'],2)}"
-        msg += f"\nTP: {round(data['tp'],2)}"
+        if entry:
+            msg += f"\nENTRY: {round(entry,2)}\n"
+            msg += f"SL: {round(sl,2)}\n"
+            msg += f"TP: {round(tp,2)}\n"
 
-    await update.message.reply_text(msg)
+        await update.message.reply_text(msg)
 
-
-# 🚨 AUTO ALERT (ULTRA)
-async def auto_alert(app):
-    global last_alert_time
-
-    while True:
-        now = datetime.now()
-
-        for name, symbol in SYMBOLS.items():
-            data = analyze(symbol, "15m")
-
-            if data and data["ultra"]:
-
-                last_time = last_alert_time.get(name)
-
-                if last_time and (now - last_time).seconds < 7200:
-                    continue
-
-                last_alert_time[name] = now
-
-                msg = f"🚨 ULTRA SETUP {name.upper()} 🚨\n\n"
-                msg += f"{data['desc']}\n"
-                msg += f"\nRSI: {data['rsi']}"
-                msg += f"\nENTRY: {round(data['entry'],2)}"
-                msg += f"\nSL: {round(data['sl'],2)}"
-                msg += f"\nTP: {round(data['tp'],2)}"
-
-                await app.bot.send_message(chat_id=CHAT_ID, text=msg)
-
-        await asyncio.sleep(300)
+    except Exception as e:
+        await update.message.reply_text(f"Błąd: {str(e)}")
 
 
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("trend", trend))
-
-app.job_queue.run_once(lambda ctx: asyncio.create_task(auto_alert(app)), 1)
 
 app.run_polling()

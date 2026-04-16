@@ -13,12 +13,40 @@ SYMBOLS = {
 }
 
 INTERVALS = {
+    "1m": "1m",
+    "5m": "5m",
     "15m": "15m",
     "1h": "60m"
 }
 
+
+def get_htf_trend(symbol):
+    df = yf.download(symbol, period="7d", interval="60m")
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df = df.dropna()
+    df["EMA200"] = df["Close"].ewm(span=200).mean()
+
+    last = df.iloc[-1]
+
+    if float(last["Close"]) > float(last["EMA200"]):
+        return "UP 📈"
+    else:
+        return "DOWN 📉"
+
+
 def analyze(symbol, interval):
-    df = yf.download(symbol, period="7d", interval=interval)
+    # 🔴 dopasowanie period
+    if interval == "1m":
+        period = "1d"
+    elif interval == "5m":
+        period = "5d"
+    else:
+        period = "7d"
+
+    df = yf.download(symbol, period=period, interval=interval)
 
     if df.empty:
         return "BRAK DANYCH ⚠️", 0, "-", "-", "-", 0
@@ -63,13 +91,13 @@ def analyze(symbol, interval):
     macd = float(last["MACD"])
     signal_line = float(last["SIGNAL"])
 
-    # 🔥 TREND
+    # TREND
     trend = "UP 📈" if close > ema200 else "DOWN 📉"
 
-    # 🔥 MOMENTUM
+    # MOMENTUM
     momentum = "BULLISH" if macd > signal_line else "BEARISH"
 
-    # 🔥 FVG DETECTION
+    # FVG
     fvg = "NONE"
     if len(df) > 3:
         c1 = df.iloc[-3]
@@ -80,33 +108,33 @@ def analyze(symbol, interval):
         elif c1["Low"] > c3["High"]:
             fvg = "BEARISH"
 
+    # 🔴 filtr szumu dla niskich TF
+    if interval in ["1m", "5m"]:
+        if abs(rsi - 50) < 5:
+            return "NO TRADE ⚪ (CHOP)", rsi, trend, momentum, fvg, 0
+
     score = 0
 
-    # trend alignment
     if ema20 > ema50:
         score += 1
     else:
         score -= 1
 
-    # RSI mid zone
     if 45 < rsi < 65:
         score += 1
 
-    # MACD
     if macd > signal_line:
         score += 1
     else:
         score -= 1
 
-    # FVG boost
     if fvg == "BULLISH":
         score += 1
     elif fvg == "BEARISH":
         score -= 1
 
-    # Bollinger filter
     if close > last["UPPER"] or close < last["LOWER"]:
-        score -= 1  # overextended
+        score -= 1
 
     # FINAL
     if score >= 3:
@@ -130,15 +158,18 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         interval = INTERVALS.get(timeframe)
 
         if symbol is None or interval is None:
-            await update.message.reply_text("Błędne dane. Użyj np: /trend nasdaq 15m")
+            await update.message.reply_text("Użycie: /trend nasdaq 15m")
             return
 
         signal, rsi, trend_dir, momentum, fvg, confidence = analyze(symbol, interval)
+        htf = get_htf_trend(symbol)
 
         now = datetime.now().strftime("%H:%M")
 
         msg = f"{asset.upper()} ({timeframe})\n"
         msg += f"Czas: {now}\n\n"
+        msg += f"TF: {timeframe}\n"
+        msg += f"HTF (1h): {htf}\n"
         msg += f"Trend: {trend_dir}\n"
         msg += f"Momentum: {momentum}\n"
         msg += f"FVG: {fvg}\n\n"

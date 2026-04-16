@@ -49,7 +49,7 @@ def analyze(symbol, interval):
     df = yf.download(symbol, period=period, interval=interval)
 
     if df.empty:
-        return "BRAK DANYCH ⚠️", 0, "-", "-", "-", 0
+        return "BRAK DANYCH ⚠️", 0, "-", "-", "-", 0, None, None, None
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -80,6 +80,13 @@ def analyze(symbol, interval):
     df["UPPER"] = df["MA20"] + 2 * df["STD"]
     df["LOWER"] = df["MA20"] - 2 * df["STD"]
 
+    # ATR
+    df["H-L"] = df["High"] - df["Low"]
+    df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
+    df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
+    df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
+    df["ATR"] = df["TR"].rolling(14).mean()
+
     df = df.dropna()
     last = df.iloc[-1]
 
@@ -90,6 +97,7 @@ def analyze(symbol, interval):
     rsi = float(last["RSI"])
     macd = float(last["MACD"])
     signal_line = float(last["SIGNAL"])
+    atr = float(last["ATR"])
 
     # TREND
     trend = "UP 📈" if close > ema200 else "DOWN 📉"
@@ -108,10 +116,10 @@ def analyze(symbol, interval):
         elif c1["Low"] > c3["High"]:
             fvg = "BEARISH"
 
-    # 🔴 filtr szumu dla niskich TF
+    # 🔴 filtr szumu (1m / 5m)
     if interval in ["1m", "5m"]:
         if abs(rsi - 50) < 5:
-            return "NO TRADE ⚪ (CHOP)", rsi, trend, momentum, fvg, 0
+            return "NO TRADE ⚪ (CHOP)", rsi, trend, momentum, fvg, 0, None, None, None
 
     score = 0
 
@@ -136,7 +144,7 @@ def analyze(symbol, interval):
     if close > last["UPPER"] or close < last["LOWER"]:
         score -= 1
 
-    # FINAL
+    # FINAL SIGNAL
     if score >= 3:
         signal = "BUY 🔼 (STRONG)"
     elif score <= -3:
@@ -146,7 +154,31 @@ def analyze(symbol, interval):
 
     confidence = min(abs(score) * 20, 100)
 
-    return signal, round(rsi, 2), trend, momentum, fvg, confidence
+    # ❌ FAKE BREAKOUT FILTER
+    prev = df.iloc[-2]
+
+    if signal.startswith("BUY") and close < prev["High"]:
+        return "NO TRADE ⚪ (FAKE BREAKOUT)", rsi, trend, momentum, fvg, 0, None, None, None
+
+    if signal.startswith("SELL") and close > prev["Low"]:
+        return "NO TRADE ⚪ (FAKE BREAKOUT)", rsi, trend, momentum, fvg, 0, None, None, None
+
+    # 🎯 ENTRY / SL / TP
+    entry = None
+    sl = None
+    tp = None
+
+    if signal.startswith("BUY") and momentum == "BULLISH":
+        entry = close
+        sl = close - atr
+        tp = close + (2 * atr)
+
+    elif signal.startswith("SELL") and momentum == "BEARISH":
+        entry = close
+        sl = close + atr
+        tp = close - (2 * atr)
+
+    return signal, round(rsi, 2), trend, momentum, fvg, confidence, entry, sl, tp
 
 
 async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -161,14 +193,13 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Użycie: /trend nasdaq 15m")
             return
 
-        signal, rsi, trend_dir, momentum, fvg, confidence = analyze(symbol, interval)
+        signal, rsi, trend_dir, momentum, fvg, confidence, entry, sl, tp = analyze(symbol, interval)
         htf = get_htf_trend(symbol)
 
         now = datetime.now().strftime("%H:%M")
 
         msg = f"{asset.upper()} ({timeframe})\n"
         msg += f"Czas: {now}\n\n"
-        msg += f"TF: {timeframe}\n"
         msg += f"HTF (1h): {htf}\n"
         msg += f"Trend: {trend_dir}\n"
         msg += f"Momentum: {momentum}\n"
@@ -177,10 +208,12 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"Confidence: {confidence}%\n\n"
         msg += f"RSI: {rsi}"
 
-        await update.message.reply_text(msg)
+        if entry:
+            msg += f"\nENTRY: {round(entry,2)}\n"
+            msg += f"SL: {round(sl,2)}\n"
+            msg += f"TP: {round(tp,2)}\n"
 
-    except Exception as e:
-        await update.message.reply_text(f"Błąd: {str(e)}")
+        await update.message.reply_text(msg)
 
 
 app = ApplicationBuilder().token(TOKEN).build()

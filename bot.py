@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = "8645220556:AAFH8GO9pZs7X4-GstlI2fGU477ThusIJAs"
-CHAT_ID = "1846362978"  # do auto alertów
+CHAT_ID = "1846362978"
 
 SYMBOLS = {
     "nasdaq": "^IXIC",
@@ -21,7 +21,9 @@ INTERVALS = {
     "1h": "60m"
 }
 
+last_alert_time = {}
 
+# HTF
 def get_htf_trend(symbol):
     df = yf.download(symbol, period="7d", interval="60m")
     df = df.dropna()
@@ -46,7 +48,6 @@ def analyze(symbol, interval):
     df = df.dropna()
 
     # EMA
-    df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
 
@@ -56,12 +57,6 @@ def analyze(symbol, interval):
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
-
-    # MACD
-    ema12 = df["Close"].ewm(span=12).mean()
-    ema26 = df["Close"].ewm(span=26).mean()
-    df["MACD"] = ema12 - ema26
-    df["SIGNAL"] = df["MACD"].ewm(span=9).mean()
 
     # ATR
     df["TR"] = (df["High"] - df["Low"]).combine(
@@ -73,89 +68,116 @@ def analyze(symbol, interval):
     df["VOL_MA"] = df["Volume"].rolling(20).mean()
 
     df = df.dropna()
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
 
     close = last["Close"]
     rsi = last["RSI"]
     atr = last["ATR"]
 
-    # TREND
     trend = "UP" if close > last["EMA200"] else "DOWN"
+    htf = get_htf_trend(symbol)
 
-    # MOMENTUM
-    momentum = "BULLISH" if last["MACD"] > last["SIGNAL"] else "BEARISH"
-
-    # VOLUME
     volume_spike = last["Volume"] > last["VOL_MA"] * 1.5
 
-    # MARKET STRUCTURE (proste HH/LL)
+    # 🔥 MARKET STRUCTURE
     hh = last["High"] > prev["High"]
     ll = last["Low"] < prev["Low"]
 
     structure = "BULLISH" if hh else "BEARISH" if ll else "RANGE"
 
-    # HTF
-    htf = get_htf_trend(symbol)
+    # 🔥 LIQUIDITY SWEEP (STOP HUNT)
+    sweep_high = last["High"] > prev["High"] and close < prev["High"]
+    sweep_low = last["Low"] < prev["Low"] and close > prev["Low"]
 
-    # FILTRY (NO TRADE)
+    # 🔥 FAKE BREAKOUT
+    fake_breakout_up = prev["High"] < prev2["High"] and close < prev["High"]
+    fake_breakout_down = prev["Low"] > prev2["Low"] and close > prev["Low"]
+
+    # FILTR CHOP
     if 45 < rsi < 55 and not volume_spike:
         return {"signal": "NO TRADE", "reason": "chop"}
 
-    if trend != htf:
-        return {"signal": "NO TRADE", "reason": "against HTF"}
-
     # CONFLUENCE
-    confluence = 0
+    score = 0
 
     if trend == "UP":
-        confluence += 1
-    if momentum == "BULLISH":
-        confluence += 1
-    if volume_spike:
-        confluence += 1
-    if structure == "BULLISH":
-        confluence += 1
-
+        score += 1
     if trend == "DOWN":
-        confluence -= 1
-    if momentum == "BEARISH":
-        confluence -= 1
-    if structure == "BEARISH":
-        confluence -= 1
+        score -= 1
 
-    # SIGNAL
+    if volume_spike:
+        score += 1
+
+    if structure == "BULLISH":
+        score += 1
+    elif structure == "BEARISH":
+        score -= 1
+
+    # 🔥 SMART MONEY SIGNALS
     signal = "NO TRADE"
 
-    if confluence >= 3:
+    # BUY SETUP
+    if sweep_low and trend == "UP" and volume_spike:
         signal = "BUY"
-    elif confluence <= -3:
+
+    # SELL SETUP
+    if sweep_high and trend == "DOWN" and volume_spike:
         signal = "SELL"
 
-    # ENTRY
-    entry = close
-    sl = close - atr if signal == "BUY" else close + atr
-    tp = close + (2 * atr) if signal == "BUY" else close - (2 * atr)
+    # FAKE BREAKOUT REVERSAL
+    if fake_breakout_up and trend == "DOWN":
+        signal = "SELL"
 
-    # ULTRA SETUP
+    if fake_breakout_down and trend == "UP":
+        signal = "BUY"
+
+    # HTF FILTER
+    if trend != htf:
+        signal = "NO TRADE"
+
+    # ENTRY / SL / TP (smart)
+    entry = close
+    sl = None
+    tp = None
+
+    if signal == "BUY":
+        sl = last["Low"] - atr * 0.5
+        tp = close + (2 * atr)
+
+    elif signal == "SELL":
+        sl = last["High"] + atr * 0.5
+        tp = close - (2 * atr)
+
+    # 🔥 ULTRA SETUP (bardzo rzadki)
     ultra = False
-    if signal != "NO TRADE" and volume_spike and trend == htf and abs(rsi - 50) > 10:
+
+    if (
+        signal != "NO TRADE"
+        and volume_spike
+        and trend == htf
+        and abs(rsi - 50) > 10
+        and (sweep_high or sweep_low)
+    ):
         ultra = True
 
-    # LUDZKI OPIS
-    description = f"Trend {trend}, momentum {momentum}, struktura {structure}."
+    # OPIS
+    desc = f"Trend {trend}, struktura {structure}."
+    if sweep_high or sweep_low:
+        desc += " Liquidity sweep."
     if volume_spike:
-        description += " Wysoki wolumen."
+        desc += " Wysoki wolumen."
 
     return {
         "signal": signal,
         "trend": trend,
-        "momentum": momentum,
         "rsi": round(rsi, 2),
         "entry": entry,
         "sl": sl,
         "tp": tp,
-        "desc": description,
+        "desc": desc,
         "ultra": ultra
     }
 
@@ -187,31 +209,40 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
-# 🚨 AUTO ALERT LOOP
+# 🚨 AUTO ALERT (ULTRA)
 async def auto_alert(app):
+    global last_alert_time
+
     while True:
+        now = datetime.now()
+
         for name, symbol in SYMBOLS.items():
             data = analyze(symbol, "15m")
 
             if data and data["ultra"]:
+
+                last_time = last_alert_time.get(name)
+
+                if last_time and (now - last_time).seconds < 7200:
+                    continue
+
+                last_alert_time[name] = now
+
                 msg = f"🚨 ULTRA SETUP {name.upper()} 🚨\n\n"
                 msg += f"{data['desc']}\n"
+                msg += f"\nRSI: {data['rsi']}"
                 msg += f"\nENTRY: {round(data['entry'],2)}"
                 msg += f"\nSL: {round(data['sl'],2)}"
                 msg += f"\nTP: {round(data['tp'],2)}"
 
                 await app.bot.send_message(chat_id=CHAT_ID, text=msg)
 
-        await asyncio.sleep(300)  # co 5 min
+        await asyncio.sleep(300)
 
 
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("trend", trend))
 
 app.job_queue.run_once(lambda ctx: asyncio.create_task(auto_alert(app)), 1)
-
-app.run_polling()
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("trend", trend))
 
 app.run_polling()

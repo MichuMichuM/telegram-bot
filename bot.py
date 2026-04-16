@@ -38,7 +38,7 @@ def get_htf_trend(symbol):
 
 
 def analyze(symbol, interval):
-    # 🔴 dopasowanie period
+    # dobór danych
     if interval == "1m":
         period = "1d"
     elif interval == "5m":
@@ -116,7 +116,7 @@ def analyze(symbol, interval):
         elif c1["Low"] > c3["High"]:
             fvg = "BEARISH"
 
-    # 🔴 filtr szumu (1m / 5m)
+    # filtr szumu
     if interval in ["1m", "5m"]:
         if abs(rsi - 50) < 5:
             return "NO TRADE ⚪ (CHOP)", rsi, trend, momentum, fvg, 0, None, None, None
@@ -144,7 +144,6 @@ def analyze(symbol, interval):
     if close > last["UPPER"] or close < last["LOWER"]:
         score -= 1
 
-    # FINAL SIGNAL
     if score >= 3:
         signal = "BUY 🔼 (STRONG)"
     elif score <= -3:
@@ -154,16 +153,16 @@ def analyze(symbol, interval):
 
     confidence = min(abs(score) * 20, 100)
 
-    # ❌ FAKE BREAKOUT FILTER
+    # fake breakout
     prev = df.iloc[-2]
 
     if signal.startswith("BUY") and close < prev["High"]:
-        return "NO TRADE ⚪ (FAKE BREAKOUT)", rsi, trend, momentum, fvg, 0, None, None, None
+        return "NO TRADE ⚪ (FAKE)", rsi, trend, momentum, fvg, 0, None, None, None
 
     if signal.startswith("SELL") and close > prev["Low"]:
-        return "NO TRADE ⚪ (FAKE BREAKOUT)", rsi, trend, momentum, fvg, 0, None, None, None
+        return "NO TRADE ⚪ (FAKE)", rsi, trend, momentum, fvg, 0, None, None, None
 
-    # 🎯 ENTRY / SL / TP
+    # ENTRY / SL / TP
     entry = None
     sl = None
     tp = None
@@ -214,6 +213,9 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"TP: {round(tp,2)}\n"
 
         await update.message.reply_text(msg)
+
+    except Exception as e:
+        await update.message.reply_text(f"Błąd: {str(e)}")
 
 
 app = ApplicationBuilder().token(TOKEN).build()

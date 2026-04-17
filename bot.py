@@ -33,6 +33,7 @@ def get_data(symbol, interval):
 
     response = requests.get(url, params=params)
     data = response.json()
+    print(data)
 
     if "values" not in data:
         return pd.DataFrame()

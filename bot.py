@@ -1,86 +1,92 @@
-import yfinance as yf
+import requests
 import pandas as pd
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = "8645220556:AAFH8GO9pZs7X4-GstlI2fGU477ThusIJAs"
+API_KEY = "678984701b674f59acf5d7c7a8d0585b"
 
 SYMBOLS = {
-    "nasdaq": "^IXIC",
-    "sp500": "^GSPC",
-    "gold": "GC=F"
+    "nasdaq": "NDX",
+    "sp500": "SPX",
+    "gold": "XAU/USD"
 }
 
 INTERVALS = {
-    "1m": "1m",
-    "5m": "5m",
-    "15m": "15m",
-    "1h": "60m"
+    "1m": "1min",
+    "5m": "5min",
+    "15m": "15min",
+    "1h": "1h"
 }
 
 
+def get_data(symbol, interval):
+    url = "https://api.twelvedata.com/time_series"
+
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "apikey": API_KEY,
+        "outputsize": 200
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    if "values" not in data:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(data["values"])
+    df = df.iloc[::-1]
+
+    df["Close"] = df["close"].astype(float)
+    df["High"] = df["high"].astype(float)
+    df["Low"] = df["low"].astype(float)
+
+    return df
+
+
 def get_htf_trend(symbol):
-    df = yf.download(symbol, period="7d", interval="60m")
+    df = get_data(symbol, "1h")
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    if df.empty:
+        return "-"
 
-    df = df.dropna()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
-
     last = df.iloc[-1]
 
-    if float(last["Close"]) > float(last["EMA200"]):
-        return "UP 📈"
-    else:
-        return "DOWN 📉"
+    return "UP 📈" if last["Close"] > last["EMA200"] else "DOWN 📉"
 
 
 def analyze(symbol, interval):
-    # dobór danych
-    if interval == "1m":
-        period = "1d"
-    elif interval == "5m":
-        period = "5d"
-    else:
-        period = "7d"
-
-    df = yf.download(symbol, period=period, interval=interval)
+    df = get_data(symbol, interval)
 
     if df.empty:
         return "BRAK DANYCH ⚠️", 0, "-", "-", "-", 0, None, None, None
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
     df = df.dropna()
 
-    # EMA
     df["EMA20"] = df["Close"].ewm(span=20).mean()
     df["EMA50"] = df["Close"].ewm(span=50).mean()
     df["EMA200"] = df["Close"].ewm(span=200).mean()
 
-    # RSI
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
 
-    # MACD
     ema12 = df["Close"].ewm(span=12).mean()
     ema26 = df["Close"].ewm(span=26).mean()
     df["MACD"] = ema12 - ema26
     df["SIGNAL"] = df["MACD"].ewm(span=9).mean()
 
-    # Bollinger
     df["MA20"] = df["Close"].rolling(20).mean()
     df["STD"] = df["Close"].rolling(20).std()
     df["UPPER"] = df["MA20"] + 2 * df["STD"]
     df["LOWER"] = df["MA20"] - 2 * df["STD"]
 
-    # ATR
     df["H-L"] = df["High"] - df["Low"]
     df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
     df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
@@ -99,13 +105,9 @@ def analyze(symbol, interval):
     signal_line = float(last["SIGNAL"])
     atr = float(last["ATR"])
 
-    # TREND
     trend = "UP 📈" if close > ema200 else "DOWN 📉"
-
-    # MOMENTUM
     momentum = "BULLISH" if macd > signal_line else "BEARISH"
 
-    # FVG
     fvg = "NONE"
     if len(df) > 3:
         c1 = df.iloc[-3]
@@ -116,8 +118,7 @@ def analyze(symbol, interval):
         elif c1["Low"] > c3["High"]:
             fvg = "BEARISH"
 
-    # filtr szumu
-    if interval in ["1m", "5m"]:
+    if interval in ["1min", "5min"]:
         if abs(rsi - 50) < 5:
             return "NO TRADE ⚪ (CHOP)", rsi, trend, momentum, fvg, 0, None, None, None
 
@@ -153,7 +154,6 @@ def analyze(symbol, interval):
 
     confidence = min(abs(score) * 20, 100)
 
-    # fake breakout
     prev = df.iloc[-2]
 
     if signal.startswith("BUY") and close < prev["High"]:
@@ -162,7 +162,6 @@ def analyze(symbol, interval):
     if signal.startswith("SELL") and close > prev["Low"]:
         return "NO TRADE ⚪ (FAKE)", rsi, trend, momentum, fvg, 0, None, None, None
 
-    # ENTRY / SL / TP
     entry = None
     sl = None
     tp = None
@@ -218,6 +217,10 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Błąd: {str(e)}")
 
 
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("trend", trend))
+
+app.run_polling()
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("trend", trend))
 

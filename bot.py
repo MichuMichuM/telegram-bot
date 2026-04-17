@@ -8,8 +8,8 @@ TOKEN = "8645220556:AAFH8GO9pZs7X4-GstlI2fGU477ThusIJAs"
 API_KEY = "678984701b674f59acf5d7c7a8d0585b"
 
 SYMBOLS = {
-    "nasdaq": "US100",
-    "sp500": "SPX",
+    "nasdaq": "QQQ",
+    "sp500": "SPY",
     "gold": "XAU/USD"
 }
 

@@ -33,7 +33,6 @@ def get_data(symbol, interval):
 
     response = requests.get(url, params=params)
     data = response.json()
-    print(data)
 
     if "values" not in data:
         return pd.DataFrame()
@@ -218,10 +217,6 @@ async def trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Błąd: {str(e)}")
 
 
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("trend", trend))
-
-app.run_polling()
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("trend", trend))
 
